@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+.env
+.git
+.gitignore
+data/
+*.db
+*.db-shm
+*.db-wal
+README.md
+SETUP_GUIDE.md
+DEPLOY_FLYIO.md
+.vscode
+.idea
+*.swp
+*.swo
