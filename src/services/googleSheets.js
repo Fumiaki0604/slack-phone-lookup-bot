@@ -13,7 +13,7 @@ const CREDENTIALS_PATH = process.env.GOOGLE_CREDENTIALS_PATH ||
 
 // スプレッドシート設定
 const DEFAULT_SHEET_ID = process.env.PHONE_DB_SHEET_ID || '1ijBHI5EaxsO6kmlPqwnYon5-Z5P7ez9_xsi-Dmhfm8Y';
-const DEFAULT_SHEET_NAME = process.env.PHONE_DB_SHEET_NAME || 'シート1';
+const DEFAULT_SHEET_NAME = process.env.PHONE_DB_SHEET_NAME || 'DB';
 const EMPLOYEE_SHEET_NAME = process.env.EMPLOYEE_SHEET_NAME || '社員';
 
 // 社員名簿キャッシュ

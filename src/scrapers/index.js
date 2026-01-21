@@ -1,71 +1,53 @@
-﻿/**
- * Phone number lookup using a public Google Sheet (CSV export).
+/**
+ * Phone number lookup using Google Sheets API (authenticated).
  */
 
-const axios = require('axios');
+const { google } = require('googleapis');
+const path = require('path');
+const fs = require('fs');
 const { normalizePhoneNumber } = require('../utils/phoneParser');
 
 const DEFAULT_SHEET_ID = '1ijBHI5EaxsO6kmlPqwnYon5-Z5P7ez9_xsi-Dmhfm8Y';
 const DEFAULT_SHEET_GID = '1654711040';
+const DEFAULT_SHEET_NAME = 'DB';
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+const CREDENTIALS_PATH = process.env.GOOGLE_CREDENTIALS_PATH ||
+  path.join(__dirname, '..', '..', 'credentials.json');
 
 let cached = {
   fetchedAt: 0,
   data: null
 };
 
-function getSheetUrl() {
-  const sheetId = process.env.PHONE_DB_SHEET_ID || DEFAULT_SHEET_ID;
-  const sheetGid = process.env.PHONE_DB_SHEET_GID || DEFAULT_SHEET_GID;
-  return `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${sheetGid}`;
-}
+let sheetsClient = null;
 
-function parseCsv(text) {
-  const rows = [];
-  let row = [];
-  let field = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i];
-    const next = text[i + 1];
-
-    if (char === '"') {
-      if (inQuotes && next === '"') {
-        field += '"';
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (!inQuotes && (char === ',' || char === '\n' || char === '\r')) {
-      if (char === '\r' && next === '\n') {
-        i += 1;
-      }
-      row.push(field);
-      field = '';
-
-      if (char !== ',') {
-        rows.push(row);
-        row = [];
-      }
-      continue;
-    }
-
-    field += char;
+/**
+ * Initialize Google Sheets API client
+ */
+async function initSheetsClient() {
+  if (sheetsClient) {
+    return sheetsClient;
   }
 
-  row.push(field);
-  rows.push(row);
+  if (!fs.existsSync(CREDENTIALS_PATH)) {
+    console.warn(`Google credentials file not found at ${CREDENTIALS_PATH}`);
+    return null;
+  }
 
-  return rows.filter(r => r.some(cell => String(cell).trim() !== ''));
-}
+  try {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: CREDENTIALS_PATH,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    });
 
-function getColumnIndex(header, name, fallback) {
-  const idx = header.indexOf(name);
-  return idx === -1 ? fallback : idx;
+    sheetsClient = google.sheets({ version: 'v4', auth });
+    console.log('Google Sheets API (read) initialized');
+    return sheetsClient;
+  } catch (error) {
+    console.error('Failed to initialize Google Sheets API:', error.message);
+    return null;
+  }
 }
 
 function deriveSpamScore(category) {
@@ -80,16 +62,28 @@ async function getSheetData() {
     return cached.data;
   }
 
-  const url = getSheetUrl();
-  const response = await axios.get(url, { timeout: 10000 });
-  const rows = parseCsv(response.data);
+  const client = await initSheetsClient();
+  if (!client) {
+    throw new Error('Google Sheets API not available');
+  }
+
+  const sheetId = process.env.PHONE_DB_SHEET_ID || DEFAULT_SHEET_ID;
+  const sheetName = process.env.PHONE_DB_SHEET_NAME || DEFAULT_SHEET_NAME;
+
+  const response = await client.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `${sheetName}!A:D`,
+  });
+
+  const rows = response.data.values || [];
   const header = rows[0] || [];
   const dataRows = rows.slice(1);
 
-  const phoneIndex = getColumnIndex(header, '電話番号', 0);
-  const nameIndex = getColumnIndex(header, '会社名', 1);
-  const categoryIndex = getColumnIndex(header, 'カテゴリ', 2);
-  const countIndex = getColumnIndex(header, '荷電回数', 3);
+  // Find column indices
+  const phoneIndex = header.indexOf('電話番号') !== -1 ? header.indexOf('電話番号') : 0;
+  const nameIndex = header.indexOf('会社名') !== -1 ? header.indexOf('会社名') : 1;
+  const categoryIndex = header.indexOf('カテゴリ') !== -1 ? header.indexOf('カテゴリ') : 2;
+  const countIndex = header.indexOf('荷電回数') !== -1 ? header.indexOf('荷電回数') : 3;
 
   const byPhone = new Map();
 
@@ -115,6 +109,7 @@ async function getSheetData() {
     data: { byPhone }
   };
 
+  console.log(`Loaded ${dataRows.length} phone records from sheet`);
   return cached.data;
 }
 
@@ -165,8 +160,6 @@ async function lookupPhone(phoneNumber) {
 
 /**
  * スパムスコアに基づいて絵文字を返す
- * @param {number|null} spamScore - スパムスコア (0-10) または null (不明)
- * @returns {string} - 絵文字
  */
 function getSpamEmoji(spamScore) {
   if (spamScore === null) return ':white_circle:';
@@ -177,8 +170,6 @@ function getSpamEmoji(spamScore) {
 
 /**
  * スパムスコアの説明を返す
- * @param {number|null} spamScore - スパムスコア (0-10) または null (不明)
- * @returns {string} - 説明文
  */
 function getSpamDescription(spamScore) {
   if (spamScore === null) return '口コミがないため不明';
