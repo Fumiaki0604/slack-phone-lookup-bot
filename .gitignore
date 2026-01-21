@@ -27,6 +27,12 @@ Thumbs.db
 *.swp
 *.swo
 
+# Google credentials (sensitive)
+credentials.json
+
+# Temp files
+nul
+
 # Test coverage
 coverage/
 

@@ -178,10 +178,44 @@ heroku config:set SLACK_SOCKET_MODE=false
 git push heroku main
 ```
 
+## アーキテクチャ
+
+### データフロー
+1. Slackチャンネルにメッセージが投稿される
+2. `src/index.js`のmessageイベントハンドラが電話番号を検出
+3. `src/utils/phoneParser.js`で電話番号を抽出・正規化
+4. `src/scrapers/index.js`がGoogle Sheetsから電話番号データを検索（5分間キャッシュ）
+5. 未登録番号は自動的にスプレッドシートに追加
+6. スレッドに検索結果を返信、履歴をDBに保存
+7. 録音テキストがある場合、Claude APIで宛先を解析し該当社員にメンション
+
+### 主要モジュール
+- **src/index.js**: Slack Boltアプリのエントリーポイント。メッセージイベント処理、スラッシュコマンド、録音解析・メンション機能
+- **src/scrapers/index.js**: Google Sheets (CSV export)から電話番号データを取得。キャッシュ機能付き
+- **src/scrapers/jpnumber.js**: jpnumber.comからの補助情報取得（口コミ・スパムスコア）
+- **src/services/googleSheets.js**: Google Sheets API。未登録番号の自動追加、社員名簿の取得
+- **src/services/claude.js**: Claude APIで録音テキストから宛先（ひらがな姓）を抽出
+- **src/database/db.js**: sql.js (WebAssembly SQLite)。着信履歴・ブロックリスト・企業登録の3テーブル
+- **src/utils/phoneParser.js**: 日本の電話番号パターン検出、ハイフン正規化
+- **src/admin/server.js**: Express管理パネル（PORT 3001）
+
+### スパムスコア
+- 0-3: 安全
+- 4-6: 要注意
+- 7-10: 営業電話の可能性大（元メッセージに⚠️リアクション付与）
+- null: 口コミがないため不明
+
+### Google Sheets構成
+
+#### 電話番号シート（シート1）
+列: A=電話番号, B=会社名, C=カテゴリ, D=荷電回数
+
+#### 社員シート（社員）
+列: A=名前, B=読み（ひらがな）, C=SlackユーザーID
+
 ## 注意事項
 
-- スクレイピングは無料のWebサイトから情報を取得しています
-- サイトの仕様変更により動作しなくなる可能性があります
+- Google Sheetsから電話番号データを取得しています
 - 過度なリクエストを避けるため、検索結果はキャッシュされます
 - ブロックリストと登録企業情報はSQLiteデータベースに保存されます
 

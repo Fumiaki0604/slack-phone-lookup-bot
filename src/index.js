@@ -1,15 +1,17 @@
-/**
+﻿/**
  * Slack電話番号検索Bot メインファイル
+ * Updated: trigger nodemon restart
  */
 
 require('dotenv').config();
 const { App } = require('@slack/bolt');
-const { extractPhoneNumbers, getPhoneType } = require('./utils/phoneParser');
-const { lookupPhone, getSpamEmoji, getSpamDescription } = require('./scrapers');
+const express = require('express');
+const { extractPhoneNumbers } = require('./utils/phoneParser');
+const { lookupPhone, clearCache } = require('./scrapers');
 const db = require('./database/db');
-
-// データベースを初期化
-db.initDatabase();
+const adminRouter = require('./admin/server');
+const googleSheets = require('./services/googleSheets');
+const claude = require('./services/claude');
 
 // Slackアプリを初期化
 const app = new App({
@@ -22,7 +24,7 @@ const app = new App({
 
 /**
  * メッセージイベントをリッスン
- * 電話番号を含むメッセージを検出して自動的に検索
+ * 電話番号を含むメッセージを検知して自動的に検索
  */
 app.event('message', async ({ event, client, logger }) => {
   try {
@@ -45,10 +47,12 @@ app.event('message', async ({ event, client, logger }) => {
 
     logger.info(`Found ${phoneNumbers.length} phone number(s) in message: ${phoneNumbers.join(', ')}`);
 
-    // 各電話番号を処理
     for (const phoneNumber of phoneNumbers) {
       await processPhoneNumber(phoneNumber, event, client, logger);
     }
+
+    // 録音内容がある場合、宛先を特定してメンション
+    await processTranscriptionMention(text, event, client, logger);
   } catch (error) {
     logger.error('Error processing message:', error);
   }
@@ -59,47 +63,61 @@ app.event('message', async ({ event, client, logger }) => {
  */
 async function processPhoneNumber(phoneNumber, event, client, logger) {
   try {
-    // まず「検索中」メッセージを投稿
     const searchingMsg = await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.ts,
-      text: `🔍 ${phoneNumber} を検索中...`
+      text: `:mag: ${phoneNumber} を検索中...`
     });
 
-    // 登録済み企業情報をチェック
     const registeredCompany = db.getRegisteredCompany(phoneNumber);
     if (registeredCompany) {
       await updateWithRegisteredInfo(client, event.channel, searchingMsg.ts, phoneNumber, registeredCompany);
       return;
     }
 
-    // ブロックリストをチェック
     const blocked = db.isBlocked(phoneNumber);
     if (blocked) {
       await updateWithBlockedInfo(client, event.channel, searchingMsg.ts, phoneNumber, blocked);
       return;
     }
 
-    // 電話番号を検索
     const result = await lookupPhone(phoneNumber);
 
-    // 検索結果をフォーマット
-    const message = formatLookupResult(phoneNumber, result);
+    // 未登録番号→スプレッドシートに追加、登録済み→荷電回数+1
+    let isNewlyAdded = false;
+    if (googleSheets.isAvailable()) {
+      if (!result.found) {
+        const added = await googleSheets.addPhoneNumber(phoneNumber, '', '');
+        if (added) {
+          logger.info(`Added unregistered phone number to sheet: ${phoneNumber}`);
+          clearCache();
+          result.found = true;
+          result.details = { sheet: { phoneNumber, companyName: null, category: null, callCount: 1 } };
+          isNewlyAdded = true;
+        }
+      } else {
+        const currentCount = result.details?.sheet?.callCount || 0;
+        const updated = await googleSheets.incrementCallCount(phoneNumber, currentCount);
+        if (updated) {
+          result.details.sheet.callCount = currentCount + 1;
+          clearCache();
+        }
+      }
+    }
 
-    // 「検索中」メッセージを更新
+    const message = formatLookupResult(phoneNumber, result, isNewlyAdded);
+
     await client.chat.update({
       channel: event.channel,
       ts: searchingMsg.ts,
       text: message
     });
 
-    // 着信履歴を保存
     db.saveCallHistory(phoneNumber, result, {
       messageTs: event.ts,
       channel: event.channel
     });
 
-    // スパムスコアが高い場合は警告リアクションを追加
     if (result.spamScore >= 7) {
       await client.reactions.add({
         channel: event.channel,
@@ -117,55 +135,34 @@ async function processPhoneNumber(phoneNumber, event, client, logger) {
 /**
  * 検索結果をフォーマット
  */
-function formatLookupResult(phoneNumber, result) {
-  const emoji = getSpamEmoji(result.spamScore);
-  const description = getSpamDescription(result.spamScore);
-  const phoneType = getPhoneType(phoneNumber);
-
-  let message = `${emoji} **${phoneNumber}** の検索結果\n\n`;
+function formatLookupResult(phoneNumber, result, isNewlyAdded = false) {
+  let message = `:telephone: *${phoneNumber}* の検索結果\n\n`;
 
   if (result.found) {
-    // 会社名
-    if (result.companyName) {
-      message += `📌 **事業者名**: ${result.companyName}\n`;
-    }
+    const rawName = result.companyName ? String(result.companyName).trim() : '';
+    const companyName = rawName && rawName !== '?' ? rawName : '不明';
+    const category = result.category ? String(result.category).trim() : '不明';
+    const callCount = result.details && result.details.sheet
+      ? result.details.sheet.callCount
+      : null;
+    const callCountText = callCount !== null && !Number.isNaN(callCount)
+      ? callCount
+      : '不明';
 
-    // カテゴリ
-    if (result.category) {
-      message += `🏷️ **カテゴリ**: ${result.category}\n`;
-    }
+    message += `:pushpin: *会社名*: ${companyName}\n`;
+    message += `:label: *カテゴリ*: ${category}\n`;
+    message += `:bar_chart: *荷電回数*: ${callCountText}\n`;
 
-    // 電話番号の種類
-    message += `📞 **種別**: ${phoneType}\n`;
-
-    // スパムスコア
-    message += `⚠️ **営業電話スコア**: ${result.spamScore}/10 - ${description}\n`;
-
-    // タグ
-    if (result.tags && result.tags.length > 0) {
-      message += `🏷️ **タグ**: ${result.tags.join(', ')}\n`;
-    }
-
-    // 情報源
-    message += `\n📊 **情報源**: ${result.sources.join(', ')}\n`;
-
-    // コメント（最大3件）
-    if (result.comments && result.comments.length > 0) {
-      message += `\n💬 **最近のコメント**:\n`;
-      result.comments.slice(0, 3).forEach((comment, index) => {
-        message += `${index + 1}. ${comment.substring(0, 100)}${comment.length > 100 ? '...' : ''}\n`;
-      });
+    if (isNewlyAdded) {
+      message += `\n:new: _新規登録されました_`;
     }
   } else {
-    message += `📞 **種別**: ${phoneType}\n`;
-    message += `\nℹ️ この電話番号の情報は見つかりませんでした。\n`;
-    message += `初めての着信の可能性があります。`;
+    message += ':information_source: シートに該当がありませんでした。';
   }
 
-  // 過去の着信履歴
   const history = db.getCallHistory(phoneNumber, 5);
   if (history && history.length > 1) {
-    message += `\n\n📋 **過去の着信**: ${history.length}回`;
+    message += `\n\n:clipboard: *直近の着信*: ${history.length}件`;
   }
 
   return message;
@@ -175,11 +172,11 @@ function formatLookupResult(phoneNumber, result) {
  * 登録済み企業情報で更新
  */
 async function updateWithRegisteredInfo(client, channel, messageTs, phoneNumber, companyInfo) {
-  const message = `✅ **${phoneNumber}** - 登録済み企業\n\n` +
-    `📌 **企業名**: ${companyInfo.company_name}\n` +
-    (companyInfo.category ? `🏷️ **カテゴリ**: ${companyInfo.category}\n` : '') +
-    (companyInfo.notes ? `📝 **メモ**: ${companyInfo.notes}\n` : '') +
-    `\n💾 登録者: ${companyInfo.added_by}`;
+  const message = `:white_check_mark: *${phoneNumber}* - 登録済み企業\n\n` +
+    `:pushpin: *会社名*: ${companyInfo.company_name}\n` +
+    (companyInfo.category ? `:label: *カテゴリ*: ${companyInfo.category}\n` : '') +
+    (companyInfo.notes ? `:memo: *メモ*: ${companyInfo.notes}\n` : '') +
+    `\n:floppy_disk: 登録者 ${companyInfo.added_by}`;
 
   await client.chat.update({
     channel: channel,
@@ -192,10 +189,10 @@ async function updateWithRegisteredInfo(client, channel, messageTs, phoneNumber,
  * ブロック済み番号で更新
  */
 async function updateWithBlockedInfo(client, channel, messageTs, phoneNumber, blockInfo) {
-  const message = `🚫 **${phoneNumber}** - ブロック済み\n\n` +
-    `⛔ **理由**: ${blockInfo.reason}\n` +
-    `💾 登録者: ${blockInfo.added_by}\n\n` +
-    `⚠️ この番号はブロックリストに登録されています。`;
+  const message = `:no_entry_sign: *${phoneNumber}* - ブロック済み\n\n` +
+    `:warning: *理由*: ${blockInfo.reason}\n` +
+    `:floppy_disk: 登録者 ${blockInfo.added_by}\n\n` +
+    ':warning: この番号はブロックリストに登録されています。';
 
   await client.chat.update({
     channel: channel,
@@ -205,18 +202,111 @@ async function updateWithBlockedInfo(client, channel, messageTs, phoneNumber, bl
 }
 
 /**
- * スラッシュコマンド: /phone-register
+ * 録音内容から宛先を抽出してメンション
+ * fondeskの録音テキストを解析し、該当社員にメンションを送る
+ */
+async function processTranscriptionMention(text, event, client, logger) {
+  // Claude APIが利用可能でない場合はスキップ
+  if (!claude.isAvailable()) {
+    return;
+  }
+
+  // 録音内容を抽出（「録音:」の後のテキスト）
+  const transcription = extractTranscription(text);
+  if (!transcription) {
+    return;
+  }
+
+  // 25文字未満は宛先特定困難のためスキップ
+  if (transcription.length < 25) {
+    logger.info(`Transcription too short (${transcription.length} chars), skipping Claude`);
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.ts,
+      text: `:grey_question: 宛先を特定できませんでした。`
+    });
+    return;
+  }
+
+  logger.info('Found transcription in message, analyzing with Claude...');
+
+  try {
+    // Claudeで宛先を抽出
+    const result = await claude.extractRecipient(transcription);
+
+    if (!result.recipientName) {
+      logger.info('No recipient name found in transcription');
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: event.ts,
+        text: `:grey_question: 宛先を特定できませんでした。`
+      });
+      return;
+    }
+
+    logger.info(`Claude extracted recipient: ${result.recipientName} (confidence: ${result.confidence})`);
+
+    // confidence が low の場合はスキップ
+    if (result.confidence === 'low') {
+      logger.info('Skipping mention due to low confidence');
+      return;
+    }
+
+    // 社員名簿から検索
+    const employee = await googleSheets.findEmployeeByName(result.recipientName);
+
+    if (!employee) {
+      logger.info(`No matching employee found for: ${result.recipientName}`);
+      return;
+    }
+
+    logger.info(`Found matching employee: ${employee.name} (${employee.slackUserId})`);
+
+    // スレッドにメンション付きメッセージを投稿
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.ts,
+      text: `:bell: <@${employee.slackUserId}> さん宛ての電話がありました。\n` +
+        `> _${result.reason}_`
+    });
+
+    logger.info(`Sent mention to ${employee.name} (${employee.slackUserId})`);
+  } catch (error) {
+    logger.error('Error processing transcription mention:', error);
+  }
+}
+
+/**
+ * メッセージから録音テキストを抽出
+ * fondeskの形式: 「録音: ...」
+ */
+function extractTranscription(text) {
+  // 「録音:」または「*録音*:」（太字）で始まる部分を抽出
+  const match = text.match(/\*?録音\*?[:：]\s*([\s\S]+?)(?:\n少なく|$)/i);
+  if (match) {
+    return match[1].trim();
+  }
+
+  // 別のパターン: 詳細を開くの後に続くテキスト
+  const altMatch = text.match(/詳細を開く\s*\n([\s\S]+?)(?:\n#|$)/i);
+  if (altMatch) {
+    return altMatch[1].trim();
+  }
+
+  return null;
+}
+
+/**
+ * スラッシュコマンド /phone-register
  * 手動で企業情報を登録
  */
 app.command('/phone-register', async ({ command, ack, respond }) => {
   await ack();
 
   try {
-    // コマンドの引数をパース
-    // 例: /phone-register 050-1234-5678 株式会社テスト 取引先
     const args = command.text.split(' ');
     if (args.length < 2) {
-      await respond('使い方: `/phone-register 電話番号 企業名 [カテゴリ] [メモ]`');
+      await respond('使い方: `/phone-register 電話番号 会社名 [カテゴリ] [メモ]`');
       return;
     }
 
@@ -227,14 +317,14 @@ app.command('/phone-register', async ({ command, ack, respond }) => {
 
     db.registerCompany(phoneNumber, companyName, category, notes, command.user_name);
 
-    await respond(`✅ ${phoneNumber} を ${companyName} として登録しました。`);
+    await respond(`:white_check_mark: ${phoneNumber} を ${companyName} として登録しました。`);
   } catch (error) {
-    await respond(`❌ エラーが発生しました: ${error.message}`);
+    await respond(`:x: エラーが発生しました: ${error.message}`);
   }
 });
 
 /**
- * スラッシュコマンド: /phone-block
+ * スラッシュコマンド /phone-block
  * 電話番号をブロックリストに追加
  */
 app.command('/phone-block', async ({ command, ack, respond }) => {
@@ -252,14 +342,14 @@ app.command('/phone-block', async ({ command, ack, respond }) => {
 
     db.addToBlocklist(phoneNumber, reason, command.user_name);
 
-    await respond(`🚫 ${phoneNumber} をブロックリストに追加しました。`);
+    await respond(`:no_entry_sign: ${phoneNumber} をブロックリストに追加しました。`);
   } catch (error) {
-    await respond(`❌ エラーが発生しました: ${error.message}`);
+    await respond(`:x: エラーが発生しました: ${error.message}`);
   }
 });
 
 /**
- * スラッシュコマンド: /phone-stats
+ * スラッシュコマンド /phone-stats
  * 統計情報を表示
  */
 app.command('/phone-stats', async ({ command, ack, respond }) => {
@@ -268,13 +358,13 @@ app.command('/phone-stats', async ({ command, ack, respond }) => {
   try {
     const stats = db.getStats();
 
-    let message = '📊 **電話番号検索Bot 統計情報**\n\n';
-    message += `📞 総着信数: ${stats.totalCalls}\n`;
-    message += `🚫 ブロック済み番号: ${stats.blockedNumbers}\n`;
-    message += `💾 登録企業数: ${stats.registeredCompanies}\n`;
+    let message = ':bar_chart: *電話番号検索Bot 統計情報*\n\n';
+    message += `:telephone_receiver: 総着信数: ${stats.totalCalls}\n`;
+    message += `:no_entry_sign: ブロック済み番号: ${stats.blockedNumbers}\n`;
+    message += `:floppy_disk: 登録企業数: ${stats.registeredCompanies}\n`;
 
     if (stats.topSpamCalls && stats.topSpamCalls.length > 0) {
-      message += `\n⚠️ **営業電話ランキング（スコア7以上）**:\n`;
+      message += '\n:warning: *営業電話ランキング (スコア7以上)*:\n';
       stats.topSpamCalls.forEach((call, index) => {
         message += `${index + 1}. ${call.phone_number} (${call.company_name || '不明'}) - ${call.call_count}回\n`;
       });
@@ -282,13 +372,23 @@ app.command('/phone-stats', async ({ command, ack, respond }) => {
 
     await respond(message);
   } catch (error) {
-    await respond(`❌ エラーが発生しました: ${error.message}`);
+    await respond(`:x: エラーが発生しました: ${error.message}`);
   }
 });
 
 // アプリを起動
 (async () => {
+  await db.initDatabase();
+
   const port = process.env.PORT || 3000;
   await app.start(port);
-  console.log(`⚡️ Slack Phone Lookup Bot is running on port ${port}`);
+  console.log(`Slack Phone Lookup Bot is running on port ${port}`);
+
+  const adminPort = process.env.ADMIN_PORT || 3001;
+  const adminApp = express();
+  adminApp.use('/admin', adminRouter);
+  adminApp.get('/', (req, res) => res.redirect('/admin'));
+  adminApp.listen(adminPort, () => {
+    console.log(`Admin panel is running at http://localhost:${adminPort}/admin`);
+  });
 })();

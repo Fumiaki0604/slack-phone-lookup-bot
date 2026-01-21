@@ -1,101 +1,206 @@
-/**
- * 電話番号検索の統合モジュール
- * 複数のソースから情報を収集して統合
+﻿/**
+ * Phone number lookup using a public Google Sheet (CSV export).
  */
 
-const jpnumber = require('./jpnumber');
-const telnavi = require('./telNaviScraper');
+const axios = require('axios');
+const { normalizePhoneNumber } = require('../utils/phoneParser');
+
+const DEFAULT_SHEET_ID = '1ijBHI5EaxsO6kmlPqwnYon5-Z5P7ez9_xsi-Dmhfm8Y';
+const DEFAULT_SHEET_GID = '1654711040';
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+let cached = {
+  fetchedAt: 0,
+  data: null
+};
+
+function getSheetUrl() {
+  const sheetId = process.env.PHONE_DB_SHEET_ID || DEFAULT_SHEET_ID;
+  const sheetGid = process.env.PHONE_DB_SHEET_GID || DEFAULT_SHEET_GID;
+  return `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${sheetGid}`;
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        field += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (!inQuotes && (char === ',' || char === '\n' || char === '\r')) {
+      if (char === '\r' && next === '\n') {
+        i += 1;
+      }
+      row.push(field);
+      field = '';
+
+      if (char !== ',') {
+        rows.push(row);
+        row = [];
+      }
+      continue;
+    }
+
+    field += char;
+  }
+
+  row.push(field);
+  rows.push(row);
+
+  return rows.filter(r => r.some(cell => String(cell).trim() !== ''));
+}
+
+function getColumnIndex(header, name, fallback) {
+  const idx = header.indexOf(name);
+  return idx === -1 ? fallback : idx;
+}
+
+function deriveSpamScore(category) {
+  if (!category) return null;
+  if (String(category).includes('営業')) return 7;
+  return 0;
+}
+
+async function getSheetData() {
+  const now = Date.now();
+  if (cached.data && now - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const url = getSheetUrl();
+  const response = await axios.get(url, { timeout: 10000 });
+  const rows = parseCsv(response.data);
+  const header = rows[0] || [];
+  const dataRows = rows.slice(1);
+
+  const phoneIndex = getColumnIndex(header, '電話番号', 0);
+  const nameIndex = getColumnIndex(header, '会社名', 1);
+  const categoryIndex = getColumnIndex(header, 'カテゴリ', 2);
+  const countIndex = getColumnIndex(header, '荷電回数', 3);
+
+  const byPhone = new Map();
+
+  dataRows.forEach(cols => {
+    const rawPhone = cols[phoneIndex] || '';
+    if (!rawPhone) return;
+    const normalized = normalizePhoneNumber(String(rawPhone).trim());
+    const digitsOnly = normalized.replace(/-/g, '');
+
+    const record = {
+      phoneNumber: normalized,
+      companyName: cols[nameIndex] ? String(cols[nameIndex]).trim() : null,
+      category: cols[categoryIndex] ? String(cols[categoryIndex]).trim() : null,
+      callCount: cols[countIndex] ? Number(cols[countIndex]) : null
+    };
+
+    byPhone.set(normalized, record);
+    byPhone.set(digitsOnly, record);
+  });
+
+  cached = {
+    fetchedAt: now,
+    data: { byPhone }
+  };
+
+  return cached.data;
+}
 
 /**
- * 複数のソースから電話番号情報を検索
- * @param {string} phoneNumber - 検索する電話番号
- * @returns {Promise<Object>} - 統合された検索結果
+ * Look up a phone number in the Google Sheet.
+ * @param {string} phoneNumber - Phone number to lookup.
+ * @returns {Promise<Object>} - Lookup result.
  */
 async function lookupPhone(phoneNumber) {
   console.log(`Looking up phone number: ${phoneNumber}`);
 
-  // 並列で複数のソースから検索
-  const results = await Promise.allSettled([
-    jpnumber.searchPhone(phoneNumber),
-    telnavi.searchPhone(phoneNumber)
-  ]);
+  const normalized = normalizePhoneNumber(phoneNumber);
+  const digitsOnly = normalized.replace(/-/g, '');
 
-  // 結果を統合
-  const aggregated = {
-    phoneNumber: phoneNumber,
-    found: false,
-    sources: [],
-    companyName: null,
-    category: null,
-    spamScore: 0,
+  const data = await getSheetData();
+  const record = data.byPhone.get(normalized) || data.byPhone.get(digitsOnly);
+
+  if (!record) {
+    return {
+      phoneNumber,
+      found: false,
+      sources: [],
+      companyName: null,
+      category: null,
+      spamScore: null,
+      hasComments: false,
+      commentCount: 0,
+      tags: [],
+      comments: [],
+      details: { sheet: null }
+    };
+  }
+
+  return {
+    phoneNumber,
+    found: true,
+    sources: ['sheet'],
+    companyName: record.companyName || null,
+    category: record.category || null,
+    spamScore: deriveSpamScore(record.category),
+    hasComments: false,
+    commentCount: 0,
     tags: [],
     comments: [],
-    details: {}
+    details: { sheet: record }
   };
-
-  results.forEach((result, index) => {
-    if (result.status === 'fulfilled' && result.value.found) {
-      const data = result.value;
-      aggregated.found = true;
-      aggregated.sources.push(data.source);
-
-      // 会社名（最初に見つかったものを採用）
-      if (!aggregated.companyName && data.companyName) {
-        aggregated.companyName = data.companyName;
-      }
-
-      // カテゴリ
-      if (!aggregated.category && data.category) {
-        aggregated.category = data.category;
-      }
-
-      // スパムスコア（最大値を採用）
-      if (data.spamScore > aggregated.spamScore) {
-        aggregated.spamScore = data.spamScore;
-      }
-
-      // タグを統合
-      if (data.tags && data.tags.length > 0) {
-        aggregated.tags = [...new Set([...aggregated.tags, ...data.tags])];
-      }
-
-      // コメントを統合
-      if (data.comments && data.comments.length > 0) {
-        aggregated.comments = [...aggregated.comments, ...data.comments];
-      }
-
-      // 各ソースの詳細データを保存
-      aggregated.details[data.source] = data;
-    }
-  });
-
-  return aggregated;
 }
 
 /**
  * スパムスコアに基づいて絵文字を返す
- * @param {number} spamScore - スパムスコア (0-10)
+ * @param {number|null} spamScore - スパムスコア (0-10) または null (不明)
  * @returns {string} - 絵文字
  */
 function getSpamEmoji(spamScore) {
-  if (spamScore >= 7) return '🔴';  // 高リスク（営業電話の可能性大）
-  if (spamScore >= 4) return '🟡';  // 中リスク（要注意）
-  return '🟢';  // 低リスク（安全）
+  if (spamScore === null) return ':white_circle:';
+  if (spamScore >= 7) return ':red_circle:';
+  if (spamScore >= 4) return ':yellow_circle:';
+  return ':green_circle:';
 }
 
 /**
  * スパムスコアの説明を返す
- * @param {number} spamScore - スパムスコア (0-10)
+ * @param {number|null} spamScore - スパムスコア (0-10) または null (不明)
  * @returns {string} - 説明文
  */
 function getSpamDescription(spamScore) {
+  if (spamScore === null) return '口コミがないため不明';
   if (spamScore >= 7) return '営業電話の可能性が高いです';
   if (spamScore >= 4) return '営業電話の可能性があります';
-  return '特に問題は報告されていません';
+  return '特に問題の報告はありません';
+}
+
+/**
+ * キャッシュをクリアして次回のlookupで最新データを取得
+ */
+function clearCache() {
+  cached = {
+    fetchedAt: 0,
+    data: null
+  };
+  console.log('Sheet cache cleared');
 }
 
 module.exports = {
   lookupPhone,
   getSpamEmoji,
-  getSpamDescription
+  getSpamDescription,
+  clearCache
 };
