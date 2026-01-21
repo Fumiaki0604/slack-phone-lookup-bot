@@ -5,8 +5,10 @@ Fondeskなどからの着信通知をSlackで受け取った際、自動的に�
 ## 機能
 
 ### 🔍 自動検索
-- Slackに投稿された電話番号を自動検出
-- jpnumber.com、電話帳ナビから情報をスクレイピング
+- Slackに投稿された電話番号を自動検出（ユーザー・ボットアプリ問わず）
+- Fondeskなどのボットアプリからの着信通知にも自動対応
+- Google Sheetsから電話番号データを取得（5分間キャッシュ）
+- jpnumber.comから補助情報を取得
 - スレッドに検索結果を自動返信
 
 ### 🚨 営業電話判定
@@ -83,7 +85,18 @@ SLACK_SIGNING_SECRET=your-signing-secret-here
 SLACK_APP_TOKEN=xapp-your-app-token-here
 SLACK_SOCKET_MODE=true
 PORT=3000
+ADMIN_PORT=3001
+PHONE_DB_SHEET_ID=your-spreadsheet-id-here
+PHONE_DB_SHEET_GID=0
+PHONE_DB_SHEET_NAME=DB
+EMPLOYEE_SHEET_NAME=社員
+GOOGLE_CREDENTIALS_PATH=./credentials.json
+ANTHROPIC_API_KEY=sk-ant-your-api-key-here
 ```
+
+**Google認証情報の設定:**
+- ローカル環境: `credentials.json`ファイルをプロジェクトルートに配置
+- クラウド環境（Render等）: 環境変数`GOOGLE_CREDENTIALS_JSON`にcredentials.jsonの内容をJSON文字列として設定
 
 ### 5. ボットの起動
 
@@ -158,12 +171,39 @@ slack-phone-lookup-bot/
 2. 「New Web Service」を選択
 3. GitHubリポジトリを接続
 4. 以下の設定:
+   - **Language**: Node
    - **Build Command**: `npm install`
    - **Start Command**: `npm start`
-   - **Environment Variables**: `.env`の内容を設定
-   - `SLACK_SOCKET_MODE=false` に変更（公開URLを使用）
+   - **Region**: Singapore（日本に近い）
+   - **Instance Type**: Free
 
-5. デプロイ後、RenderのURLをSlackのEvent SubscriptionsのRequest URLに設定
+5. 環境変数を設定（以下を追加）:
+   ```
+   SLACK_BOT_TOKEN=xoxb-...
+   SLACK_SIGNING_SECRET=...
+   SLACK_SOCKET_MODE=false
+   PORT=3000
+   ADMIN_PORT=3001
+   PHONE_DB_SHEET_ID=...
+   PHONE_DB_SHEET_GID=0
+   PHONE_DB_SHEET_NAME=DB
+   EMPLOYEE_SHEET_NAME=社員
+   ANTHROPIC_API_KEY=sk-ant-...
+   GOOGLE_CREDENTIALS_JSON={"type":"service_account",...}
+   ```
+   **重要**: `GOOGLE_CREDENTIALS_JSON`はcredentials.jsonの内容を1行のJSON文字列として設定
+   **重要**: `SLACK_APP_TOKEN`は不要（HTTP Modeのため）
+
+6. デプロイ完了後、Renderから提供されるURL（例: `https://your-app.onrender.com`）を確認
+
+7. SlackアプリのEvent Subscriptionsを設定:
+   - https://api.slack.com/apps でアプリを選択
+   - 「Event Subscriptions」→「Enable Events」をON
+   - Request URLに `https://your-app.onrender.com/slack/events` を入力
+   - Verified表示を確認
+   - 「Save Changes」をクリック
+
+**注意**: Render無料プランは15分間リクエストがないとスリープします。次のリクエスト時に起動（30秒〜1分遅延）。常時起動が必要な場合は有料プラン（$7/月〜）を検討してください。
 
 ### Herokuへのデプロイ
 
@@ -222,9 +262,12 @@ git push heroku main
 ## トラブルシューティング
 
 ### ボットがメッセージに反応しない
-1. Slackアプリの権限を確認
+1. Slackアプリの権限を確認（OAuth & Permissionsで必要な権限が付与されているか）
 2. Event Subscriptionsが有効か確認
-3. ボットがチャンネルに招待されているか確認
+3. ボットがチャンネルに招待されているか確認（`/invite @ボット名`）
+4. Fondeskなど他のボットからのメッセージの場合:
+   - ボット自身のメッセージは処理対象外ですが、Fondeskなど他のボットアプリは処理します
+   - ログを確認して電話番号が検出されているか確認してください
 
 ### スクレイピングエラー
 - 検索サイトが一時的にダウンしている可能性
