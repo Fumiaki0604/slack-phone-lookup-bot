@@ -7,9 +7,10 @@ const { google } = require('googleapis');
 const path = require('path');
 const fs = require('fs');
 
-// 認証情報のパス
+// 認証情報のパスまたはJSON文字列
 const CREDENTIALS_PATH = process.env.GOOGLE_CREDENTIALS_PATH ||
   path.join(__dirname, '..', '..', 'credentials.json');
+const CREDENTIALS_JSON = process.env.GOOGLE_CREDENTIALS_JSON; // 環境変数からJSON文字列を取得
 
 // スプレッドシート設定
 const DEFAULT_SHEET_ID = process.env.PHONE_DB_SHEET_ID || '1ijBHI5EaxsO6kmlPqwnYon5-Z5P7ez9_xsi-Dmhfm8Y';
@@ -33,18 +34,31 @@ async function initSheetsClient() {
     return sheetsClient;
   }
 
-  // 認証情報ファイルが存在するか確認
-  if (!fs.existsSync(CREDENTIALS_PATH)) {
-    console.warn(`Google credentials file not found at ${CREDENTIALS_PATH}`);
-    console.warn('Sheet write functionality will be disabled.');
-    return null;
-  }
-
   try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: CREDENTIALS_PATH,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
+    let auth;
+
+    // 環境変数にJSON文字列がある場合はそれを使用
+    if (CREDENTIALS_JSON) {
+      const credentials = JSON.parse(CREDENTIALS_JSON);
+      auth = new google.auth.GoogleAuth({
+        credentials: credentials,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+      });
+      console.log('Using Google credentials from environment variable');
+    }
+    // それ以外はファイルパスから読み込み
+    else if (fs.existsSync(CREDENTIALS_PATH)) {
+      auth = new google.auth.GoogleAuth({
+        keyFile: CREDENTIALS_PATH,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+      });
+      console.log('Using Google credentials from file');
+    }
+    else {
+      console.warn('Google credentials not found (neither GOOGLE_CREDENTIALS_JSON nor file)');
+      console.warn('Sheet write functionality will be disabled.');
+      return null;
+    }
 
     sheetsClient = google.sheets({ version: 'v4', auth });
     console.log('Google Sheets API initialized');
@@ -158,7 +172,7 @@ async function incrementCallCount(phoneNumber, currentCount) {
  * Google Sheets APIが利用可能かどうか
  */
 function isAvailable() {
-  return fs.existsSync(CREDENTIALS_PATH);
+  return CREDENTIALS_JSON || fs.existsSync(CREDENTIALS_PATH);
 }
 
 /**
