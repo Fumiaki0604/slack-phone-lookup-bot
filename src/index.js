@@ -28,8 +28,9 @@ const app = new App({
  */
 app.event('message', async ({ event, client, logger }) => {
   try {
-    // ボット自身のメッセージは無視
-    if (event.subtype === 'bot_message' || event.bot_id) {
+    // ボット自身のメッセージのみ無視（fondeskなど他のボットは処理する）
+    // 無限ループを防ぐため、自分が投稿したメッセージは無視
+    if (event.bot_id && event.username && event.username.includes('Phone Lookup')) {
       return;
     }
 
