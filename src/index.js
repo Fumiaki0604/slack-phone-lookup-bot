@@ -247,9 +247,14 @@ async function processTranscriptionMention(text, event, client, logger) {
 
     logger.info(`Claude extracted recipient: ${result.recipientName} (confidence: ${result.confidence})`);
 
-    // confidence が low の場合はスキップ
+    // confidence が low の場合はメッセージを投稿してスキップ
     if (result.confidence === 'low') {
       logger.info('Skipping mention due to low confidence');
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: event.ts,
+        text: `:grey_question: 宛先を特定できませんでした（信頼度が低いため）。`
+      });
       return;
     }
 
@@ -258,6 +263,11 @@ async function processTranscriptionMention(text, event, client, logger) {
 
     if (!employee) {
       logger.info(`No matching employee found for: ${result.recipientName}`);
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: event.ts,
+        text: `:grey_question: 宛先「${result.recipientName}」に該当する社員が見つかりませんでした。`
+      });
       return;
     }
 
