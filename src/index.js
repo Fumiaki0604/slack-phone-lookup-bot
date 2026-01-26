@@ -39,7 +39,15 @@ app.event('message', async ({ event, client, logger }) => {
       return;
     }
 
-    const text = event.text || '';
+    let text = event.text || '';
+
+    // attachmentsからもテキストを抽出（fondeskの録音テキストはここに含まれる）
+    if (event.attachments && event.attachments.length > 0) {
+      const attachmentTexts = event.attachments.map(a => a.text || a.fallback || '').join('\n');
+      logger.info(`Attachments found: ${attachmentTexts.substring(0, 100)}...`);
+      text = text + '\n' + attachmentTexts;
+    }
+
     const phoneNumbers = extractPhoneNumbers(text);
 
     if (phoneNumbers.length === 0) {
@@ -47,6 +55,7 @@ app.event('message', async ({ event, client, logger }) => {
     }
 
     logger.info(`Found ${phoneNumbers.length} phone number(s) in message: ${phoneNumbers.join(', ')}`);
+    logger.info(`Full message text: ${text.substring(0, 200)}...`);
 
     for (const phoneNumber of phoneNumbers) {
       await processPhoneNumber(phoneNumber, event, client, logger);
@@ -209,11 +218,13 @@ async function updateWithBlockedInfo(client, channel, messageTs, phoneNumber, bl
 async function processTranscriptionMention(text, event, client, logger) {
   // Claude APIが利用可能でない場合はスキップ
   if (!claude.isAvailable()) {
+    logger.info('Claude API not available, skipping transcription analysis');
     return;
   }
 
   // 録音内容を抽出（「録音:」の後のテキスト）
   const transcription = extractTranscription(text);
+  logger.info(`Transcription extraction result: ${transcription ? transcription.substring(0, 50) + '...' : 'null'}`);
   if (!transcription) {
     return;
   }
