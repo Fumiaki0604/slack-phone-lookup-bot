@@ -43,8 +43,14 @@ app.event('message', async ({ event, client, logger }) => {
 
     // attachmentsからもテキストを抽出（fondeskの録音テキストはここに含まれる）
     if (event.attachments && event.attachments.length > 0) {
-      const attachmentTexts = event.attachments.map(a => a.text || a.fallback || '').join('\n');
-      logger.info(`Attachments found: ${attachmentTexts.substring(0, 100)}...`);
+      const attachmentTexts = event.attachments.map(a => {
+        // attachments内のblocksからテキストを抽出（fondesk形式）
+        if (a.blocks && a.blocks.length > 0) {
+          return a.blocks.map(b => b.text?.text || '').join('\n');
+        }
+        return a.text || a.fallback || '';
+      }).join('\n');
+      logger.info(`Attachments text: ${attachmentTexts.substring(0, 100)}...`);
       text = text + '\n' + attachmentTexts;
     }
 
