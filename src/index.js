@@ -39,36 +39,36 @@ app.event('message', async ({ event, client, logger }) => {
       return;
     }
 
-    let text = event.text || '';
+    const messageText = event.text || '';
 
-    // attachmentsからもテキストを抽出（fondeskの録音テキストはここに含まれる）
+    // attachmentsからテキストを抽出（fondeskの録音テキストはここに含まれる）
+    let attachmentText = '';
     if (event.attachments && event.attachments.length > 0) {
-      const attachmentTexts = event.attachments.map(a => {
+      attachmentText = event.attachments.map(a => {
         // attachments内のblocksからテキストを抽出（fondesk形式）
         if (a.blocks && a.blocks.length > 0) {
           return a.blocks.map(b => b.text?.text || '').join('\n');
         }
         return a.text || a.fallback || '';
       }).join('\n');
-      logger.info(`Attachments text: ${attachmentTexts.substring(0, 100)}...`);
-      text = text + '\n' + attachmentTexts;
     }
 
-    const phoneNumbers = extractPhoneNumbers(text);
+    // 電話番号はメインテキストからのみ抽出（録音内の折り返し番号を除外）
+    const phoneNumbers = extractPhoneNumbers(messageText);
 
     if (phoneNumbers.length === 0) {
       return;
     }
 
     logger.info(`Found ${phoneNumbers.length} phone number(s) in message: ${phoneNumbers.join(', ')}`);
-    logger.info(`Full message text: ${text.substring(0, 200)}...`);
 
     for (const phoneNumber of phoneNumbers) {
       await processPhoneNumber(phoneNumber, event, client, logger);
     }
 
-    // 録音内容がある場合、宛先を特定してメンション
-    await processTranscriptionMention(text, event, client, logger);
+    // 録音内容がある場合、宛先を特定してメンション（attachmentTextを使用）
+    const fullText = messageText + '\n' + attachmentText;
+    await processTranscriptionMention(fullText, event, client, logger);
   } catch (error) {
     logger.error('Error processing message:', error);
   }
