@@ -11,7 +11,7 @@ function extractPhoneNumbers(text) {
   // 日本の電話番号パターン
   const patterns = [
     // 050-XXXX-XXXX, 03-XXXX-XXXX, 06-XXXX-XXXX など
-    /0\d{1,4}-\d{1,4}-\d{4}/g,
+    /0\d{1,4}-\d{1,4}-\d{3,4}/g,
     // 0XXXXXXXXXX (ハイフンなし)
     /0\d{9,10}/g,
   ];
