@@ -275,10 +275,10 @@ async function processTranscriptionMention(text, event, client, logger) {
       return;
     }
 
-    // 社員名簿から検索
-    const employee = await googleSheets.findEmployeeByName(result.recipientName);
+    // 社員名簿から検索（同姓の場合は複数人）
+    const employees = await googleSheets.findEmployeesByName(result.recipientName);
 
-    if (!employee) {
+    if (employees.length === 0) {
       logger.info(`No matching employee found for: ${result.recipientName}`);
       await client.chat.postMessage({
         channel: event.channel,
@@ -288,13 +288,15 @@ async function processTranscriptionMention(text, event, client, logger) {
       return;
     }
 
-    logger.info(`Found matching employee: ${employee.name} (${employee.slackUserId})`);
+    const mentions = employees.map(e => `<@${e.slackUserId}>`).join(' ');
+    const names = employees.map(e => e.name).join(', ');
+    logger.info(`Found ${employees.length} matching employee(s): ${names}`);
 
     // スレッドにメンション付きメッセージを投稿
     await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.ts,
-      text: `:bell: <@${employee.slackUserId}> さん宛ての電話がありました。\n` +
+      text: `:bell: ${mentions} さん宛ての電話がありました。\n` +
         `> _${result.reason}_`
     });
 

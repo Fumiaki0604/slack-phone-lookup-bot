@@ -233,28 +233,37 @@ async function getEmployees() {
  * @returns {Promise<Object|null>} - 一致した社員 or null
  */
 async function findEmployeeByName(name) {
-  if (!name) return null;
+  const results = await findEmployeesByName(name);
+  return results.length > 0 ? results[0] : null;
+}
+
+/**
+ * 社員名簿から名前で検索（複数人対応）
+ * 同じ苗字が複数いる場合は全員返す
+ */
+async function findEmployeesByName(name) {
+  if (!name) return [];
 
   const employees = await getEmployees();
   const normalizedName = name.toLowerCase().trim();
 
   // 完全一致を優先
-  let match = employees.find(e =>
+  const exactMatches = employees.filter(e =>
     e.reading.toLowerCase() === normalizedName ||
     e.name.toLowerCase() === normalizedName
   );
 
-  if (match) return match;
+  if (exactMatches.length > 0) return exactMatches;
 
   // 部分一致（名前が含まれている場合）
-  match = employees.find(e =>
+  const partialMatches = employees.filter(e =>
     e.reading.toLowerCase().includes(normalizedName) ||
     normalizedName.includes(e.reading.toLowerCase()) ||
     e.name.toLowerCase().includes(normalizedName) ||
     normalizedName.includes(e.name.toLowerCase())
   );
 
-  return match || null;
+  return partialMatches;
 }
 
 /**
@@ -275,5 +284,6 @@ module.exports = {
   isAvailable,
   getEmployees,
   findEmployeeByName,
+  findEmployeesByName,
   clearEmployeeCache,
 };
