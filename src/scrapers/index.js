@@ -72,7 +72,7 @@ async function getSheetData() {
 
   const response = await client.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${sheetName}!A:D`,
+    range: `${sheetName}!A:E`,
   });
 
   const rows = response.data.values || [];
@@ -84,6 +84,7 @@ async function getSheetData() {
   const nameIndex = header.indexOf('会社名') !== -1 ? header.indexOf('会社名') : 1;
   const categoryIndex = header.indexOf('カテゴリ') !== -1 ? header.indexOf('カテゴリ') : 2;
   const countIndex = header.indexOf('荷電回数') !== -1 ? header.indexOf('荷電回数') : 3;
+  const lastCallDateIndex = header.indexOf('最新荷電日') !== -1 ? header.indexOf('最新荷電日') : 4;
 
   const byPhone = new Map();
 
@@ -97,7 +98,8 @@ async function getSheetData() {
       phoneNumber: normalized,
       companyName: cols[nameIndex] ? String(cols[nameIndex]).trim() : null,
       category: cols[categoryIndex] ? String(cols[categoryIndex]).trim() : null,
-      callCount: cols[countIndex] ? Number(cols[countIndex]) : null
+      callCount: cols[countIndex] ? Number(cols[countIndex]) : null,
+      lastCallDate: cols[lastCallDateIndex] ? String(cols[lastCallDateIndex]).trim() : null
     };
 
     byPhone.set(normalized, record);

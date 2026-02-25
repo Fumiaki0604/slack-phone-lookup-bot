@@ -87,12 +87,13 @@ async function addPhoneNumber(phoneNumber, companyName = '', category = '') {
     const sheetId = process.env.PHONE_DB_SHEET_ID || DEFAULT_SHEET_ID;
     const sheetName = process.env.PHONE_DB_SHEET_NAME || DEFAULT_SHEET_NAME;
 
-    // 新しい行を追加（電話番号, 会社名, カテゴリ, 荷電回数=1）
-    const values = [[phoneNumber, companyName, category, 1]];
+    // 新しい行を追加（電話番号, 会社名, カテゴリ, 荷電回数=1, 最新荷電日）
+    const today = formatDate(new Date());
+    const values = [[phoneNumber, companyName, category, 1, today]];
 
     await client.spreadsheets.values.append({
       spreadsheetId: sheetId,
-      range: `${sheetName}!A:D`,
+      range: `${sheetName}!A:E`,
       valueInputOption: 'USER_ENTERED',
       insertDataOption: 'INSERT_ROWS',
       resource: {
@@ -117,7 +118,7 @@ async function addPhoneNumber(phoneNumber, companyName = '', category = '') {
 async function incrementCallCount(phoneNumber, currentCount) {
   const client = await initSheetsClient();
   if (!client) {
-    return false;
+    return { success: false, prevDate: null };
   }
 
   try {
@@ -127,11 +128,12 @@ async function incrementCallCount(phoneNumber, currentCount) {
     // まず電話番号の行を検索
     const response = await client.spreadsheets.values.get({
       spreadsheetId: sheetId,
-      range: `${sheetName}!A:D`,
+      range: `${sheetName}!A:E`,
     });
 
     const rows = response.data.values || [];
     let rowIndex = -1;
+    let prevDate = null;
 
     // 電話番号を正規化して比較
     const normalizedTarget = phoneNumber.replace(/-/g, '');
@@ -140,32 +142,41 @@ async function incrementCallCount(phoneNumber, currentCount) {
       const cellPhone = (rows[i][0] || '').replace(/-/g, '');
       if (cellPhone === normalizedTarget) {
         rowIndex = i + 1; // 1-indexed
+        prevDate = rows[i][4] ? String(rows[i][4]).trim() : null;
         break;
       }
     }
 
     if (rowIndex === -1) {
       console.log(`Phone number not found in sheet for update: ${phoneNumber}`);
-      return false;
+      return { success: false, prevDate: null };
     }
 
-    // 荷電回数を更新（D列）
+    // 荷電回数（D列）と最新荷電日（E列）をまとめて更新
     const newCount = (currentCount || 0) + 1;
+    const today = formatDate(new Date());
     await client.spreadsheets.values.update({
       spreadsheetId: sheetId,
-      range: `${sheetName}!D${rowIndex}`,
+      range: `${sheetName}!D${rowIndex}:E${rowIndex}`,
       valueInputOption: 'USER_ENTERED',
       resource: {
-        values: [[newCount]],
+        values: [[newCount, today]],
       },
     });
 
-    console.log(`Updated call count for ${phoneNumber}: ${newCount}`);
-    return true;
+    console.log(`Updated call count for ${phoneNumber}: ${newCount}, lastCallDate: ${today}`);
+    return { success: true, prevDate };
   } catch (error) {
     console.error('Failed to update call count:', error.message);
-    return false;
+    return { success: false, prevDate: null };
   }
+}
+
+/**
+ * 日付をYYYY/M/D形式にフォーマット
+ */
+function formatDate(date) {
+  return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
 }
 
 /**

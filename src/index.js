@@ -113,9 +113,11 @@ async function processPhoneNumber(phoneNumber, event, client, logger) {
         }
       } else {
         const currentCount = result.details?.sheet?.callCount || 0;
-        const updated = await googleSheets.incrementCallCount(phoneNumber, currentCount);
-        if (updated) {
+        const prevDate = result.details?.sheet?.lastCallDate || null;
+        const { success, prevDate: returnedPrevDate } = await googleSheets.incrementCallCount(phoneNumber, currentCount);
+        if (success) {
           result.details.sheet.callCount = currentCount + 1;
+          result.details.sheet.lastCallDate = returnedPrevDate || prevDate;
           clearCache();
         }
       }
@@ -165,9 +167,20 @@ function formatLookupResult(phoneNumber, result, isNewlyAdded = false) {
       ? callCount
       : '不明';
 
+    const lastCallDate = result.details?.sheet?.lastCallDate || null;
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}/${today.getMonth() + 1}/${today.getDate()}`;
+
     message += `:pushpin: *会社名*: ${companyName}\n`;
     message += `:label: *カテゴリ*: ${category}\n`;
     message += `:bar_chart: *荷電回数*: ${callCountText}\n`;
+
+    if (lastCallDate && !isNewlyAdded) {
+      const prev = new Date(lastCallDate.replace(/\//g, '-'));
+      const diffDays = Math.floor((today - prev) / (1000 * 60 * 60 * 24));
+      const intervalText = diffDays === 0 ? `当日` : `前回からの間隔: ${diffDays}日`;
+      message += `前回荷電日: ${lastCallDate}（${intervalText} ※本日${todayStr}）\n`;
+    }
 
     if (isNewlyAdded) {
       message += `\n:new: _新規登録されました_`;
