@@ -179,7 +179,7 @@ function formatLookupResult(phoneNumber, result, isNewlyAdded = false) {
       const prev = new Date(lastCallDate.replace(/\//g, '-'));
       const diffDays = Math.floor((today - prev) / (1000 * 60 * 60 * 24));
       const intervalText = diffDays === 0 ? `当日` : `前回からの間隔: ${diffDays}日`;
-      message += `前回荷電日: ${lastCallDate}（${intervalText} ※本日${todayStr}）\n`;
+      message += `前回荷電日: ${lastCallDate}（${intervalText}）\n`;
     }
 
     if (isNewlyAdded) {
