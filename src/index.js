@@ -62,13 +62,22 @@ app.event('message', async ({ event, client, logger }) => {
 
     logger.info(`Found ${phoneNumbers.length} phone number(s) in message: ${phoneNumbers.join(', ')}`);
 
+    const results = [];
     for (const phoneNumber of phoneNumbers) {
-      await processPhoneNumber(phoneNumber, event, client, logger);
+      const result = await processPhoneNumber(phoneNumber, event, client, logger);
+      if (result) results.push(result);
     }
 
     // 録音内容がある場合、宛先を特定してメンション（attachmentTextを使用）
     const fullText = messageText + '\n' + attachmentText;
-    await processTranscriptionMention(fullText, event, client, logger);
+    const transcriptionMentionSent = await processTranscriptionMention(fullText, event, client, logger);
+
+    // 録音でメンションできなかった場合のみF列対応者にメンション
+    if (!transcriptionMentionSent) {
+      for (const result of results) {
+        await processResponderMention(result, event, client, logger);
+      }
+    }
   } catch (error) {
     logger.error('Error processing message:', error);
   }
@@ -131,9 +140,6 @@ async function processPhoneNumber(phoneNumber, event, client, logger) {
       text: message
     });
 
-    // カテゴリが顧客系かつ対応者が設定されている場合、対応者にメンション
-    await processResponderMention(result, event, client, logger);
-
     db.saveCallHistory(phoneNumber, result, {
       messageTs: event.ts,
       channel: event.channel
@@ -148,8 +154,10 @@ async function processPhoneNumber(phoneNumber, event, client, logger) {
     }
 
     logger.info(`Successfully processed phone number: ${phoneNumber}`);
+    return result;
   } catch (error) {
     logger.error(`Error processing phone number ${phoneNumber}:`, error);
+    return null;
   }
 }
 
@@ -270,14 +278,14 @@ async function processTranscriptionMention(text, event, client, logger) {
   // Claude APIが利用可能でない場合はスキップ
   if (!claude.isAvailable()) {
     logger.info('Claude API not available, skipping transcription analysis');
-    return;
+    return false;
   }
 
   // 録音内容を抽出（「録音:」の後のテキスト）
   const transcription = extractTranscription(text);
   logger.info(`Transcription extraction result: ${transcription ? transcription.substring(0, 50) + '...' : 'null'}`);
   if (!transcription) {
-    return;
+    return false;
   }
 
   // 25文字未満は宛先特定困難のためスキップ
@@ -288,7 +296,7 @@ async function processTranscriptionMention(text, event, client, logger) {
       thread_ts: event.ts,
       text: `:grey_question: 宛先を特定できませんでした。`
     });
-    return;
+    return false;
   }
 
   logger.info('Found transcription in message, analyzing with Claude...');
@@ -304,7 +312,7 @@ async function processTranscriptionMention(text, event, client, logger) {
         thread_ts: event.ts,
         text: `:grey_question: 宛先を特定できませんでした。`
       });
-      return;
+      return false;
     }
 
     logger.info(`Claude extracted recipient: ${result.recipientName} (confidence: ${result.confidence})`);
@@ -317,7 +325,7 @@ async function processTranscriptionMention(text, event, client, logger) {
         thread_ts: event.ts,
         text: `:grey_question: 宛先を特定できませんでした（信頼度が低いため）。`
       });
-      return;
+      return false;
     }
 
     // 社員名簿から検索（同姓の場合は複数人）
@@ -330,7 +338,7 @@ async function processTranscriptionMention(text, event, client, logger) {
         thread_ts: event.ts,
         text: `:grey_question: 宛先「${result.recipientName}」に該当する社員が見つかりませんでした。`
       });
-      return;
+      return false;
     }
 
     const mentions = employees.map(e => `<@${e.slackUserId}>`).join(' ');
@@ -345,9 +353,11 @@ async function processTranscriptionMention(text, event, client, logger) {
         `> _${result.reason}_`
     });
 
-    logger.info(`Sent mention to ${employee.name} (${employee.slackUserId})`);
+    logger.info(`Sent mention to ${names}`);
+    return true;
   } catch (error) {
     logger.error('Error processing transcription mention:', error);
+    return false;
   }
 }
 
