@@ -131,6 +131,9 @@ async function processPhoneNumber(phoneNumber, event, client, logger) {
       text: message
     });
 
+    // カテゴリが顧客系かつ対応者が設定されている場合、対応者にメンション
+    await processResponderMention(result, event, client, logger);
+
     db.saveCallHistory(phoneNumber, result, {
       messageTs: event.ts,
       channel: event.channel
@@ -148,6 +151,35 @@ async function processPhoneNumber(phoneNumber, event, client, logger) {
   } catch (error) {
     logger.error(`Error processing phone number ${phoneNumber}:`, error);
   }
+}
+
+/**
+ * カテゴリが顧客系かつ対応者が設定されている場合、対応者にメンション
+ */
+async function processResponderMention(result, event, client, logger) {
+  const category = result.details?.sheet?.category || result.category || '';
+  const responder = result.details?.sheet?.responder || null;
+
+  if (!responder) return;
+
+  // カテゴリが顧客系かどうか判定
+  const isCustomerCategory = /顧客/.test(category);
+  if (!isCustomerCategory) return;
+
+  const employees = await googleSheets.findEmployeesByName(responder);
+  if (employees.length === 0) {
+    logger.info(`Responder "${responder}" not found in employee list`);
+    return;
+  }
+
+  const mentions = employees.map(e => `<@${e.slackUserId}>`).join(' ');
+  logger.info(`Sending responder mention to: ${employees.map(e => e.name).join(', ')}`);
+
+  await client.chat.postMessage({
+    channel: event.channel,
+    thread_ts: event.ts,
+    text: `:telephone_receiver: ${mentions} 前回対応者への通知: ${result.details.sheet.phoneNumber || ''} からの着信です。`
+  });
 }
 
 /**
