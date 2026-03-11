@@ -70,7 +70,7 @@ app.event('message', async ({ event, client, logger }) => {
 
     // 録音内容がある場合、宛先を特定してメンション（attachmentTextを使用）
     const fullText = messageText + '\n' + attachmentText;
-    const transcriptionMentionSent = await processTranscriptionMention(fullText, event, client, logger);
+    const transcriptionMentionSent = await processTranscriptionMention(fullText, event, client, logger, results);
 
     // 録音でメンションできなかった場合のみF列対応者にメンション
     if (!transcriptionMentionSent) {
@@ -274,7 +274,7 @@ async function updateWithBlockedInfo(client, channel, messageTs, phoneNumber, bl
  * 録音内容から宛先を抽出してメンション
  * fondeskの録音テキストを解析し、該当社員にメンションを送る
  */
-async function processTranscriptionMention(text, event, client, logger) {
+async function processTranscriptionMention(text, event, client, logger, phoneResults = []) {
   // Claude APIが利用可能でない場合はスキップ
   if (!claude.isAvailable()) {
     logger.info('Claude API not available, skipping transcription analysis');
@@ -328,8 +328,31 @@ async function processTranscriptionMention(text, event, client, logger) {
       return false;
     }
 
-    // 社員名簿から検索（同姓の場合は複数人）
-    const employees = await googleSheets.findEmployeesByName(result.recipientName);
+    // F列のresponderを取得（顧客系カテゴリのもの）
+    const responder = phoneResults
+      .map(r => r.details?.sheet)
+      .find(s => s?.responder && /顧客/.test(s?.category || ''))
+      ?.responder || null;
+
+    let employees;
+    if (responder) {
+      const recipientNorm = result.recipientName.toLowerCase();
+      const responderNorm = responder.toLowerCase();
+      const isSamePerson = responderNorm.includes(recipientNorm) || recipientNorm.includes(responderNorm);
+
+      if (isSamePerson) {
+        // 録音とF列が同一人物 → F列優先（特定の1人）
+        logger.info(`Responder matches transcription recipient, using responder: ${responder}`);
+        employees = await googleSheets.findEmployeesByName(responder);
+      } else {
+        // 異なる人物 → 録音優先
+        logger.info(`Responder differs from transcription recipient, using transcription: ${result.recipientName}`);
+        employees = await googleSheets.findEmployeesByName(result.recipientName);
+      }
+    } else {
+      // F列なし → 録音の宛先で検索
+      employees = await googleSheets.findEmployeesByName(result.recipientName);
+    }
 
     if (employees.length === 0) {
       logger.info(`No matching employee found for: ${result.recipientName}`);
