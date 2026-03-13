@@ -10,6 +10,16 @@ Fondeskなどからの着信通知をSlackで受け取った際、自動的に�
 - Google Sheetsから電話番号データを取得（5分間キャッシュ）
 - jpnumber.comから補助情報を取得
 - スレッドに検索結果を自動返信
+- 未登録番号は自動的にスプレッドシートに追加（荷電回数=1）
+- 既存番号は荷電回数を自動インクリメント＋最新荷電日を更新
+- 返信に前回荷電日と間隔を表示
+
+### 🔔 自動メンション
+- 録音テキストをClaude APIで解析し、宛先社員にメンション
+- 顧客系カテゴリかつF列（対応者）が設定されている場合、前回対応者にメンション
+- 録音宛先とF列が同一人物 → F列優先（同姓複数問題を回避）
+- 録音宛先とF列が異なる人物 → 録音優先
+- 同姓の社員が複数いる場合は全員にメンション
 
 ### 🚨 営業電話判定
 - スパムスコア（0-10）で営業電話の可能性を表示
@@ -107,6 +117,19 @@ npm start
 開発モード（自動再起動）:
 ```bash
 npm run dev
+```
+
+**PM2による常時稼働（推奨）:**
+```bash
+npm install -g pm2
+pm2 start src/index.js --name slack-bot
+pm2 save
+```
+
+Windows自動起動:
+```bash
+npm install -g pm2-windows-startup
+pm2-startup install
 ```
 
 ## 使い方
@@ -231,7 +254,7 @@ git push heroku main
 
 ### 主要モジュール
 - **src/index.js**: Slack Boltアプリのエントリーポイント。メッセージイベント処理、スラッシュコマンド、録音解析・メンション機能
-- **src/scrapers/index.js**: Google Sheets (CSV export)から電話番号データを取得。キャッシュ機能付き
+- **src/scrapers/index.js**: Google Sheets API（サービスアカウント認証）から電話番号データを取得。キャッシュ機能付き
 - **src/scrapers/jpnumber.js**: jpnumber.comからの補助情報取得（口コミ・スパムスコア）
 - **src/services/googleSheets.js**: Google Sheets API。未登録番号の自動追加、社員名簿の取得
 - **src/services/claude.js**: Claude APIで録音テキストから宛先（ひらがな姓）を抽出
@@ -248,7 +271,10 @@ git push heroku main
 ### Google Sheets構成
 
 #### 電話番号シート（DB）
-列: A=電話番号, B=会社名, C=カテゴリ, D=荷電回数
+列: A=電話番号, B=会社名, C=カテゴリ, D=荷電回数, E=最新荷電日, F=対応者
+
+- **カテゴリ**に「顧客」を含む場合、F列の対応者に自動メンション
+- **F列（対応者）**: 前回対応したスタッフ名（社員シートの名前と一致させる）
 
 #### 社員シート（社員）
 列: A=名前, B=読み（ひらがな）, C=SlackユーザーID
