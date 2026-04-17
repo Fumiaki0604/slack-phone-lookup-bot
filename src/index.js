@@ -19,7 +19,22 @@ const app = new App({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
   socketMode: process.env.SLACK_SOCKET_MODE === 'true',
   appToken: process.env.SLACK_APP_TOKEN,
-  port: process.env.PORT || 3000
+  port: process.env.PORT || 3000,
+  clientOptions: {
+    retryConfig: {
+      retries: 5,
+      factor: 2,
+      minTimeout: 1000,
+      maxTimeout: 30000,
+      randomize: true
+    }
+  }
+});
+
+// SocketModeClientの致命的エラー時にプロセスを終了（PM2が自動再起動）
+app.error(async (error) => {
+  console.error('Fatal app error, restarting process:', error);
+  process.exit(1);
 });
 
 /**
