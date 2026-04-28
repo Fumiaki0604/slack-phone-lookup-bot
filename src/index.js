@@ -4,6 +4,11 @@
  */
 
 require('dotenv').config();
+
+// システムDNSが不安定な場合のフォールバック（Google DNS）
+const dns = require('dns');
+dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
+
 const { App } = require('@slack/bolt');
 const express = require('express');
 const { extractPhoneNumbers } = require('./utils/phoneParser');
