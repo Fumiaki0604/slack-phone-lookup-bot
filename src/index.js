@@ -48,6 +48,11 @@ app.error(async (error) => {
  */
 app.event('message', async ({ event, client, logger }) => {
   try {
+    // 編集・削除イベントは無視（fondesk録音追記による2重処理を防ぐ）
+    if (event.subtype === 'message_changed' || event.subtype === 'message_deleted') {
+      return;
+    }
+
     // ボット自身のメッセージのみ無視（fondeskなど他のボットは処理する）
     // 無限ループを防ぐため、自分が投稿したメッセージは無視
     if (event.bot_id && event.username && event.username.includes('Phone Lookup')) {
@@ -510,6 +515,20 @@ app.command('/phone-stats', async ({ command, ack, respond }) => {
 
   const port = process.env.PORT || 3000;
   await app.start(port);
+
+  // SocketModeClientの致命的エラーを直接捕捉してプロセスを終了（PM2が自動再起動）
+  const smClient = app.receiver?.client;
+  if (smClient) {
+    smClient.on('unable_to_socket_mode_start', (err) => {
+      console.error('SocketModeClient unable to start, restarting process:', err?.message);
+      process.exit(1);
+    });
+    smClient.on('error', (err) => {
+      console.error('SocketModeClient error, restarting process:', err?.message);
+      process.exit(1);
+    });
+  }
+
   console.log(`Slack Phone Lookup Bot is running on port ${port}`);
 
   const adminPort = process.env.ADMIN_PORT || 3001;
