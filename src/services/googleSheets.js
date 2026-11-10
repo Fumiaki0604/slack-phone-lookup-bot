@@ -239,16 +239,6 @@ async function getEmployees() {
 }
 
 /**
- * 名前から社員を検索
- * @param {string} name - 検索する名前（ひらがな）
- * @returns {Promise<Object|null>} - 一致した社員 or null
- */
-async function findEmployeeByName(name) {
-  const results = await findEmployeesByName(name);
-  return results.length > 0 ? results[0] : null;
-}
-
-/**
  * 社員名簿から名前で検索（複数人対応）
  * 同じ苗字が複数いる場合は全員返す
  */
@@ -294,7 +284,6 @@ module.exports = {
   incrementCallCount,
   isAvailable,
   getEmployees,
-  findEmployeeByName,
   findEmployeesByName,
   clearEmployeeCache,
 };

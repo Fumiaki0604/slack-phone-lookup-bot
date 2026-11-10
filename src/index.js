@@ -1,6 +1,5 @@
 ﻿/**
  * Slack電話番号検索Bot メインファイル
- * Updated: trigger nodemon restart
  */
 
 require('dotenv').config();
@@ -12,7 +11,7 @@ dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
 const { App } = require('@slack/bolt');
 const express = require('express');
 const { extractPhoneNumbers } = require('./utils/phoneParser');
-const { lookupPhone, clearCache } = require('./scrapers');
+const { lookupPhone, clearCache } = require('./services/phoneSheetLookup');
 const db = require('./database/db');
 const adminRouter = require('./admin/server');
 const googleSheets = require('./services/googleSheets');
@@ -25,6 +24,9 @@ const app = new App({
   socketMode: process.env.SLACK_SOCKET_MODE === 'true',
   appToken: process.env.SLACK_APP_TOKEN,
   port: process.env.PORT || 3000,
+  socketModeOptions: {
+    pingPongSecs: 30,  // デフォルト5秒 → 30秒に延長（ネットワーク不安定対策）
+  },
   clientOptions: {
     retryConfig: {
       retries: 5,
@@ -36,8 +38,13 @@ const app = new App({
   }
 });
 
-// SocketModeClientの致命的エラー時にプロセスを終了（PM2が自動再起動）
+// SocketModeClientエラーハンドラー
+// 'server explicit disconnect'はネットワーク瞬断時に発生する回復可能なエラーのため無視する
 app.error(async (error) => {
+  if (error.message && error.message.includes('server explicit disconnect')) {
+    console.warn('Slack server disconnect (recoverable), ignoring:', error.message);
+    return;
+  }
   console.error('Fatal app error, restarting process:', error);
   process.exit(1);
 });
@@ -48,6 +55,7 @@ app.error(async (error) => {
  */
 app.event('message', async ({ event, client, logger }) => {
   try {
+
     // 編集・削除イベントは無視（fondesk録音追記による2重処理を防ぐ）
     if (event.subtype === 'message_changed' || event.subtype === 'message_deleted') {
       return;
@@ -300,20 +308,17 @@ async function updateWithBlockedInfo(client, channel, messageTs, phoneNumber, bl
  * fondeskの録音テキストを解析し、該当社員にメンションを送る
  */
 async function processTranscriptionMention(text, event, client, logger, phoneResults = []) {
-  // Claude APIが利用可能でない場合はスキップ
   if (!claude.isAvailable()) {
     logger.info('Claude API not available, skipping transcription analysis');
     return false;
   }
 
-  // 録音内容を抽出（「録音:」の後のテキスト）
   const transcription = extractTranscription(text);
   logger.info(`Transcription extraction result: ${transcription ? transcription.substring(0, 50) + '...' : 'null'}`);
   if (!transcription) {
     return false;
   }
 
-  // 25文字未満は宛先特定困難のためスキップ
   if (transcription.length < 25) {
     logger.info(`Transcription too short (${transcription.length} chars), skipping Claude`);
     await client.chat.postMessage({
@@ -327,7 +332,6 @@ async function processTranscriptionMention(text, event, client, logger, phoneRes
   logger.info('Found transcription in message, analyzing with Claude...');
 
   try {
-    // Claudeで宛先を抽出
     const result = await claude.extractRecipient(transcription);
 
     if (!result.recipientName) {
@@ -342,7 +346,6 @@ async function processTranscriptionMention(text, event, client, logger, phoneRes
 
     logger.info(`Claude extracted recipient: ${result.recipientName} (confidence: ${result.confidence})`);
 
-    // confidence が low の場合はメッセージを投稿してスキップ
     if (result.confidence === 'low') {
       logger.info('Skipping mention due to low confidence');
       await client.chat.postMessage({
@@ -353,31 +356,7 @@ async function processTranscriptionMention(text, event, client, logger, phoneRes
       return false;
     }
 
-    // F列のresponderを取得（顧客系カテゴリのもの）
-    const responder = phoneResults
-      .map(r => r.details?.sheet)
-      .find(s => s?.responder && /顧客/.test(s?.category || ''))
-      ?.responder || null;
-
-    let employees;
-    if (responder) {
-      const recipientNorm = result.recipientName.toLowerCase();
-      const responderNorm = responder.toLowerCase();
-      const isSamePerson = responderNorm.includes(recipientNorm) || recipientNorm.includes(responderNorm);
-
-      if (isSamePerson) {
-        // 録音とF列が同一人物 → F列優先（特定の1人）
-        logger.info(`Responder matches transcription recipient, using responder: ${responder}`);
-        employees = await googleSheets.findEmployeesByName(responder);
-      } else {
-        // 異なる人物 → 録音優先
-        logger.info(`Responder differs from transcription recipient, using transcription: ${result.recipientName}`);
-        employees = await googleSheets.findEmployeesByName(result.recipientName);
-      }
-    } else {
-      // F列なし → 録音の宛先で検索
-      employees = await googleSheets.findEmployeesByName(result.recipientName);
-    }
+    const employees = await resolveRecipientEmployees(result.recipientName, phoneResults, logger);
 
     if (employees.length === 0) {
       logger.info(`No matching employee found for: ${result.recipientName}`);
@@ -393,7 +372,6 @@ async function processTranscriptionMention(text, event, client, logger, phoneRes
     const names = employees.map(e => e.name).join(', ');
     logger.info(`Found ${employees.length} matching employee(s): ${names}`);
 
-    // スレッドにメンション付きメッセージを投稿
     await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.ts,
@@ -407,6 +385,33 @@ async function processTranscriptionMention(text, event, client, logger, phoneRes
     logger.error('Error processing transcription mention:', error);
     return false;
   }
+}
+
+/**
+ * 録音の宛先名とF列対応者を照合して検索対象の社員リストを返す
+ * 同一人物と判定した場合はF列優先（特定の1人）、異なる場合は録音優先
+ */
+async function resolveRecipientEmployees(recipientName, phoneResults, logger) {
+  const responder = phoneResults
+    .map(r => r.details?.sheet)
+    .find(s => s?.responder && /顧客/.test(s?.category || ''))
+    ?.responder || null;
+
+  if (!responder) {
+    return googleSheets.findEmployeesByName(recipientName);
+  }
+
+  const recipientNorm = recipientName.toLowerCase();
+  const responderNorm = responder.toLowerCase();
+  const isSamePerson = responderNorm.includes(recipientNorm) || recipientNorm.includes(responderNorm);
+
+  if (isSamePerson) {
+    logger.info(`Responder matches transcription recipient, using responder: ${responder}`);
+    return googleSheets.findEmployeesByName(responder);
+  }
+
+  logger.info(`Responder differs from transcription recipient, using transcription: ${recipientName}`);
+  return googleSheets.findEmployeesByName(recipientName);
 }
 
 /**
@@ -535,7 +540,14 @@ app.command('/phone-stats', async ({ command, ack, respond }) => {
   const adminApp = express();
   adminApp.use('/admin', adminRouter);
   adminApp.get('/', (req, res) => res.redirect('/admin'));
-  adminApp.listen(adminPort, () => {
+  const adminServer = adminApp.listen(adminPort, () => {
     console.log(`Admin panel is running at http://localhost:${adminPort}/admin`);
+  });
+  adminServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`Admin panel port ${adminPort} already in use, admin panel disabled`);
+    } else {
+      console.error('Admin panel error:', err.message);
+    }
   });
 })();

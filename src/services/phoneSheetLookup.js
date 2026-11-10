@@ -1,54 +1,14 @@
-/**
- * Phone number lookup using Google Sheets API (authenticated).
- */
-
-const { google } = require('googleapis');
-const path = require('path');
-const fs = require('fs');
 const { normalizePhoneNumber } = require('../utils/phoneParser');
+const { initSheetsClient } = require('./googleSheets');
 
-const DEFAULT_SHEET_ID = '1ijBHI5EaxsO6kmlPqwnYon5-Z5P7ez9_xsi-Dmhfm8Y';
-const DEFAULT_SHEET_GID = '1654711040';
-const DEFAULT_SHEET_NAME = 'DB';
+const DEFAULT_SHEET_ID = process.env.PHONE_DB_SHEET_ID || '1ijBHI5EaxsO6kmlPqwnYon5-Z5P7ez9_xsi-Dmhfm8Y';
+const DEFAULT_SHEET_NAME = process.env.PHONE_DB_SHEET_NAME || 'DB';
 const CACHE_TTL_MS = 5 * 60 * 1000;
-
-const CREDENTIALS_PATH = process.env.GOOGLE_CREDENTIALS_PATH ||
-  path.join(__dirname, '..', '..', 'credentials.json');
 
 let cached = {
   fetchedAt: 0,
   data: null
 };
-
-let sheetsClient = null;
-
-/**
- * Initialize Google Sheets API client
- */
-async function initSheetsClient() {
-  if (sheetsClient) {
-    return sheetsClient;
-  }
-
-  if (!fs.existsSync(CREDENTIALS_PATH)) {
-    console.warn(`Google credentials file not found at ${CREDENTIALS_PATH}`);
-    return null;
-  }
-
-  try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: CREDENTIALS_PATH,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-    });
-
-    sheetsClient = google.sheets({ version: 'v4', auth });
-    console.log('Google Sheets API (read) initialized');
-    return sheetsClient;
-  } catch (error) {
-    console.error('Failed to initialize Google Sheets API:', error.message);
-    return null;
-  }
-}
 
 function deriveSpamScore(category) {
   if (!category) return null;
@@ -79,7 +39,6 @@ async function getSheetData() {
   const header = rows[0] || [];
   const dataRows = rows.slice(1);
 
-  // Find column indices
   const phoneIndex = header.indexOf('電話番号') !== -1 ? header.indexOf('電話番号') : 0;
   const nameIndex = header.indexOf('会社名') !== -1 ? header.indexOf('会社名') : 1;
   const categoryIndex = header.indexOf('カテゴリ') !== -1 ? header.indexOf('カテゴリ') : 2;
@@ -117,11 +76,6 @@ async function getSheetData() {
   return cached.data;
 }
 
-/**
- * Look up a phone number in the Google Sheet.
- * @param {string} phoneNumber - Phone number to lookup.
- * @returns {Promise<Object>} - Lookup result.
- */
 async function lookupPhone(phoneNumber) {
   console.log(`Looking up phone number: ${phoneNumber}`);
 
@@ -162,29 +116,6 @@ async function lookupPhone(phoneNumber) {
   };
 }
 
-/**
- * スパムスコアに基づいて絵文字を返す
- */
-function getSpamEmoji(spamScore) {
-  if (spamScore === null) return ':white_circle:';
-  if (spamScore >= 7) return ':red_circle:';
-  if (spamScore >= 4) return ':yellow_circle:';
-  return ':green_circle:';
-}
-
-/**
- * スパムスコアの説明を返す
- */
-function getSpamDescription(spamScore) {
-  if (spamScore === null) return '口コミがないため不明';
-  if (spamScore >= 7) return '営業電話の可能性が高いです';
-  if (spamScore >= 4) return '営業電話の可能性があります';
-  return '特に問題の報告はありません';
-}
-
-/**
- * キャッシュをクリアして次回のlookupで最新データを取得
- */
 function clearCache() {
   cached = {
     fetchedAt: 0,
@@ -195,7 +126,5 @@ function clearCache() {
 
 module.exports = {
   lookupPhone,
-  getSpamEmoji,
-  getSpamDescription,
   clearCache
 };
